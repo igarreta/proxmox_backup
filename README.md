@@ -1,413 +1,388 @@
-# Guía de Backup de Configuración Proxmox
+# Backup Automático de Configuración Proxmox
 
-## 1. Identificar USB por UUID
+## Resumen del Proyecto
 
-```bash
-# Listar dispositivos conectados
-lsblk
-"Conectado en sdb"
+Sistema automatizado de backup para la configuración crítica de servidores Proxmox VE. Este proyecto incluye scripts para respaldar automáticamente todos los archivos de configuración importantes del sistema, con rotación automática de backups y programación mediante cron.
 
-# Ver información detallada de discos
-fdisk -l
+### Características principales:
 
-# Identificar UUID después del formateo
-blkid /dev/sdX1
+- **Backup automático** de configuración PVE, red, sistema y servicios
+- **Rotación automática** con retención configurable
+- **Tres tipos de backup**: diario, semanal y mensual
+- **Verificación de integridad** automática
+- **Logging completo** de todas las operaciones
+- **Script de exploración** para facilitar la gestión de backups
 
-# Verificar UUID específico
-blkid -s UUID -o value /dev/sdX1
+## Estructura del Sistema
+
+```
+/mnt/backup_usb1/proxmox-config/
+├── daily/                          # Backups diarios (7 días de retención)
+├── weekly/                         # Backups semanales (4 semanas de retención)
+├── monthly/                        # Backups mensuales (12 meses de retención)
+└── scripts/
+    ├── backup-config.sh            # Script principal de backup
+    └── explore-backup.sh           # Script para explorar backups
 ```
 
-## 2. Formatear USB en ext4
+## Instalación
+
+### Prerrequisitos
+
+- Servidor Proxmox VE
+- Disco de backup montado en `/mnt/backup_usb1/`
+- Acceso root al servidor
+
+### Pasos de instalación
+
+1. **Crear la estructura de directorios:**
+   ```bash
+   mkdir -p /mnt/backup_usb1/proxmox-config/{daily,weekly,monthly,scripts}
+   ```
+
+2. **Copiar los scripts:**
+   ```bash
+   # Copiar backup-config.sh y explore-backup.sh a:
+   cp backup-config.sh /mnt/backup_usb1/proxmox-config/scripts/
+   cp explore-backup.sh /mnt/backup_usb1/proxmox-config/scripts/
+   
+   # Dar permisos de ejecución
+   chmod +x /mnt/backup_usb1/proxmox-config/scripts/*.sh
+   ```
+
+3. **Crear archivo de log:**
+   ```bash
+   touch /var/log/proxmox-config-backup.log
+   ```
+
+4. **Configurar programación automática (ver sección "Configuración de Cron" más abajo)**
+
+5. **Probar la instalación:**
+   ```bash
+   /mnt/backup_usb1/proxmox-config/scripts/backup-config.sh daily
+   ```
+
+## Uso del Sistema
+
+### Backup Manual
 
 ```bash
-# Desmontar dispositivo (si está montado)
-umount /dev/sdX* 2>/dev/null
+# Crear backup diario
+/mnt/backup_usb1/proxmox-config/scripts/backup-config.sh daily
 
-# Crear tabla de particiones GPT
-parted /dev/sdX --script -- mklabel gpt
+# Crear backup semanal
+/mnt/backup_usb1/proxmox-config/scripts/backup-config.sh weekly
 
-# Crear partición primaria
-parted /dev/sdX --script -- mkpart primary ext4 0% 100%
-
-# Formatear en ext4 con optimizaciones
-mkfs.ext4 -L "ProxmoxBackup" -m 1 /dev/sdX1
-
-# Verificar formateo
-blkid /dev/sdX1
+# Crear backup mensual
+/mnt/backup_usb1/proxmox-config/scripts/backup-config.sh monthly
 ```
 
-## 3. Montar en fstab
+### Explorar Backups
 
 ```bash
-# Crear punto de montaje
-mkdir -p /mnt/backup_usb1
+# Listar backups disponibles
+/mnt/backup_usb1/proxmox-config/scripts/explore-backup.sh daily list
 
-# Obtener UUID del dispositivo
-UUID=$(blkid -s UUID -o value /dev/sdX1)
+# Ver contenido del backup más reciente
+/mnt/backup_usb1/proxmox-config/scripts/explore-backup.sh daily show
 
-# Agregar entrada a fstab
-echo "UUID=$UUID /mnt/backup_usb1 ext4 defaults,nofail,noatime 0 2" >> /etc/fstab
+# Extraer backup para exploración
+/mnt/backup_usb1/proxmox-config/scripts/explore-backup.sh daily extract
 
-# Montar dispositivo
-mount -a
-
-# Verificar montaje
-df -h /mnt/backup_usb1
-mount | grep backup_usb1
+# Ver archivo específico dentro del backup
+/mnt/backup_usb1/proxmox-config/scripts/explore-backup.sh daily view system-info.txt
 ```
 
-## 4. Configurar Storage en Proxmox
-
-**Desde la interfaz web:**
-
-1. **Datacenter** → **Storage** → **Add** → **Directory**
-2. Configurar parámetros:
-   - **ID**: `backup-usb-1tb`
-   - **Directory**: `/mnt/backup_usb1`
-   - **Content**: ✓ VZDump backup files
-   - **Shared**: No
-   - **Enable**: ✓ Sí
-   - **Max Backups**: 10
-
-**Verificación:**
-```bash
-# Verificar configuración
-cat /etc/pve/storage.cfg | grep -A5 backup-usb
-
-# Probar escritura
-touch /mnt/backup_usb1/test.txt && rm /mnt/backup_usb1/test.txt
-```
-
-## 5. Scripts de Backup de Configuración
-
-### Script principal para backup local
+### Monitoreo
 
 ```bash
-# Crear archivo: /root/proxmox_backup/backup-proxmox-config-local.sh
-#!/bin/bash
-
-# Configuración
-BACKUP_DIR="/root/proxmox_backup"
-DATE=$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="proxmox-config-$DATE.tar.gz"
-LOG_FILE="/var/log/proxmox-config-backup.log"
-
-# Crear directorio si no existe
-mkdir -p $BACKUP_DIR
-
-echo "$(date): Iniciando backup local de configuración Proxmox" | tee -a $LOG_FILE
-
-# Crear backup comprimido
-tar -czf "$BACKUP_DIR/$BACKUP_FILE" \
-    --exclude='/etc/pve/.version' \
-    --exclude='/etc/pve/.members' \
-    --exclude='/etc/pve/.clusterlog' \
-    /etc/pve/ \
-    /etc/network/interfaces \
-    /etc/hosts \
-    /etc/hostname \
-    /etc/fstab \
-    /etc/crontab \
-    /etc/apt/sources.list \
-    /etc/apt/sources.list.d/ \
-    /etc/postfix/ \
-    /etc/vzdump.conf \
-    /root/.ssh/ \
-    2>>$LOG_FILE
-
-# Verificar backup
-if [ $? -eq 0 ]; then
-    echo "$(date): ✓ Backup local creado: $BACKUP_FILE" | tee -a $LOG_FILE
-    SIZE=$(ls -lh "$BACKUP_DIR/$BACKUP_FILE" | awk '{print $5}')
-    echo "$(date): Tamaño del backup: $SIZE" | tee -a $LOG_FILE
-    
-    # Limpiar backups antiguos (mantener últimos 7)
-    cd $BACKUP_DIR
-    ls -t proxmox-config-*.tar.gz | tail -n +8 | xargs -r rm
-    echo "$(date): Limpieza de backups antiguos completada" | tee -a $LOG_FILE
-else
-    echo "$(date): ✗ ERROR: Falló la creación del backup local" | tee -a $LOG_FILE
-    exit 1
-fi
-
-# Crear lista de contenido
-tar -tzf "$BACKUP_DIR/$BACKUP_FILE" > "$BACKUP_DIR/contenido-$DATE.txt"
-echo "$(date): Backup local de configuración completado" | tee -a $LOG_FILE
-```
-
-### Script para backup en USB
-
-```bash
-# Crear archivo: /root/proxmox_backup/backup-proxmox-config-usb.sh
-#!/bin/bash
-
-# Configuración
-USB_BACKUP_DIR="/mnt/backup_usb1/proxmox_backup"
-LOCAL_BACKUP_DIR="/root/proxmox_backup"
-DATE=$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="proxmox-config-$DATE.tar.gz"
-LOG_FILE="/var/log/proxmox-config-backup.log"
-
-# Crear directorio en USB si no existe
-mkdir -p $USB_BACKUP_DIR
-
-echo "$(date): Iniciando backup USB de configuración Proxmox" | tee -a $LOG_FILE
-
-# Verificar que USB está montado
-if ! mountpoint -q /mnt/backup_usb1; then
-    echo "$(date): ✗ ERROR: USB no está montado" | tee -a $LOG_FILE
-    exit 1
-fi
-
-# Crear backup comprimido en USB
-tar -czf "$USB_BACKUP_DIR/$BACKUP_FILE" \
-    --exclude='/etc/pve/.version' \
-    --exclude='/etc/pve/.members' \
-    --exclude='/etc/pve/.clusterlog' \
-    /etc/pve/ \
-    /etc/network/interfaces \
-    /etc/hosts \
-    /etc/hostname \
-    /etc/fstab \
-    /etc/crontab \
-    /etc/apt/sources.list \
-    /etc/apt/sources.list.d/ \
-    /etc/postfix/ \
-    /etc/vzdump.conf \
-    /root/.ssh/ \
-    2>>$LOG_FILE
-
-# Verificar backup
-if [ $? -eq 0 ]; then
-    echo "$(date): ✓ Backup USB creado: $BACKUP_FILE" | tee -a $LOG_FILE
-    SIZE=$(ls -lh "$USB_BACKUP_DIR/$BACKUP_FILE" | awk '{print $5}')
-    echo "$(date): Tamaño del backup: $SIZE" | tee -a $LOG_FILE
-    
-    # Sincronizar con backup local (copiar el más reciente)
-    if [ -d "$LOCAL_BACKUP_DIR" ]; then
-        LATEST_LOCAL=$(ls -t $LOCAL_BACKUP_DIR/proxmox-config-*.tar.gz 2>/dev/null | head -1)
-        if [ -f "$LATEST_LOCAL" ]; then
-            cp "$LATEST_LOCAL" "$USB_BACKUP_DIR/"
-            echo "$(date): Backup local sincronizado al USB" | tee -a $LOG_FILE
-        fi
-    fi
-    
-    # Limpiar backups antiguos en USB (mantener últimos 15)
-    cd $USB_BACKUP_DIR
-    ls -t proxmox-config-*.tar.gz | tail -n +16 | xargs -r rm
-    echo "$(date): Limpieza de backups antiguos USB completada" | tee -a $LOG_FILE
-else
-    echo "$(date): ✗ ERROR: Falló la creación del backup USB" | tee -a $LOG_FILE
-    exit 1
-fi
-
-# Crear lista de contenido
-tar -tzf "$USB_BACKUP_DIR/$BACKUP_FILE" > "$USB_BACKUP_DIR/contenido-$DATE.txt"
-echo "$(date): Backup USB de configuración completado" | tee -a $LOG_FILE
-```
-
-### Script de verificación de backups
-
-```bash
-# Crear archivo: /root/proxmox_backup/verify-config-backups.sh
-#!/bin/bash
-
-LOG_FILE="/var/log/proxmox-config-backup.log"
-
-echo "$(date): Iniciando verificación de backups de configuración" | tee -a $LOG_FILE
-
-# Verificar backup local
-LOCAL_DIR="/root/proxmox_backup"
-if [ -d "$LOCAL_DIR" ]; then
-    LATEST_LOCAL=$(ls -t $LOCAL_DIR/proxmox-config-*.tar.gz 2>/dev/null | head -1)
-    if [ -f "$LATEST_LOCAL" ]; then
-        tar -tzf "$LATEST_LOCAL" > /dev/null 2>&1
-        if [ $? -eq 0 ]; then
-            echo "$(date): ✓ Backup local verificado: $(basename $LATEST_LOCAL)" | tee -a $LOG_FILE
-        else
-            echo "$(date): ✗ ERROR: Backup local corrupto: $(basename $LATEST_LOCAL)" | tee -a $LOG_FILE
-        fi
-    else
-        echo "$(date): ⚠ ADVERTENCIA: No se encontró backup local" | tee -a $LOG_FILE
-    fi
-fi
-
-# Verificar backup USB
-USB_DIR="/mnt/backup_usb1/proxmox_backup"
-if mountpoint -q /mnt/backup_usb1 && [ -d "$USB_DIR" ]; then
-    LATEST_USB=$(ls -t $USB_DIR/proxmox-config-*.tar.gz 2>/dev/null | head -1)
-    if [ -f "$LATEST_USB" ]; then
-        tar -tzf "$LATEST_USB" > /dev/null 2>&1
-        if [ $? -eq 0 ]; then
-            echo "$(date): ✓ Backup USB verificado: $(basename $LATEST_USB)" | tee -a $LOG_FILE
-        else
-            echo "$(date): ✗ ERROR: Backup USB corrupto: $(basename $LATEST_USB)" | tee -a $LOG_FILE
-        fi
-    else
-        echo "$(date): ⚠ ADVERTENCIA: No se encontró backup USB" | tee -a $LOG_FILE
-    fi
-else
-    echo "$(date): ⚠ ADVERTENCIA: USB no montado o directorio no existe" | tee -a $LOG_FILE
-fi
-
-echo "$(date): Verificación de backups completada" | tee -a $LOG_FILE
-```
-
-### Hacer scripts ejecutables
-
-```bash
-# Crear directorio de scripts
-mkdir -p /root/proxmox_backup
-
-# Hacer scripts ejecutables
-chmod +x /root/proxmox_backup/backup-proxmox-config-local.sh
-chmod +x /root/proxmox_backup/backup-proxmox-config-usb.sh
-chmod +x /root/proxmox_backup/verify-config-backups.sh
-
-# Crear directorio para logs
-touch /var/log/proxmox-config-backup.log
-```
-
-## 6. Automatización con Crontab
-
-```bash
-# Editar crontab
-crontab -e
-
-# Agregar las siguientes líneas:
-
-# Backup local diario a las 1:30 AM
-30 1 * * * /root/proxmox_backup/backup-proxmox-config-local.sh >/dev/null 2>&1
-
-# Backup USB semanal (domingos a las 2:30 AM)
-30 2 * * 0 /root/proxmox_backup/backup-proxmox-config-usb.sh >/dev/null 2>&1
-
-# Verificación de backups diaria a las 6 AM
-0 6 * * * /root/proxmox_backup/verify-config-backups.sh >/dev/null 2>&1
-
-# Limpieza de logs mensual (primer día del mes a las 3 AM)
-0 3 1 * * echo "" > /var/log/proxmox-config-backup.log
-```
-
-### Verificar crontab
-
-```bash
-# Verificar configuración
-crontab -l
-
-# Ver logs de cron
-tail -f /var/log/cron.log
-
-# Ver logs de backup
+# Ver log de operaciones
 tail -f /var/log/proxmox-config-backup.log
+
+# Ver últimas 50 líneas del log
+tail -n 50 /var/log/proxmox-config-backup.log
+
+# Verificar estado del cron
+crontab -l
 ```
 
-## 7. Instrucciones de Restauración
+## Recuperación de Información
 
-### Restauración completa en instalación nueva
+### Contenido Respaldado
+
+El sistema respalda automáticamente:
+
+- **Configuración PVE**: `/etc/pve/` (VMs, contenedores, usuarios, red del cluster)
+- **Configuración de red**: `/etc/network/interfaces`, `/etc/hosts`, `/etc/hostname`
+- **Configuración del sistema**: `/etc/fstab`, `/etc/crontab`, `/etc/cron.d/`
+- **Configuración SSH**: `/etc/ssh/sshd_config`, `/etc/ssh/ssh_config`
+- **Servicios systemd**: servicios personalizados de `/etc/systemd/system/`
+- **Información del sistema**: versión, kernel, uptime, discos
+
+### Recuperar un Archivo Específico
+
+1. **Listar archivos disponibles en el backup:**
+   ```bash
+   LATEST_BACKUP=$(ls -t /mnt/backup_usb1/proxmox-config/daily/proxmox-config-*.tar.gz | head -n 1)
+   tar -tzf "$LATEST_BACKUP"
+   ```
+
+2. **Extraer un archivo específico:**
+   ```bash
+   # Ejemplo: recuperar interfaces de red
+   tar -xzf "$LATEST_BACKUP" -O proxmox-config/interfaces > /tmp/interfaces_backup
+   
+   # Ejemplo: recuperar configuración de VM 100
+   tar -xzf "$LATEST_BACKUP" -O proxmox-config/pve/qemu-server/100.conf > /tmp/vm100_backup.conf
+   ```
+
+3. **Comparar archivo actual con backup:**
+   ```bash
+   # Extraer y comparar
+   tar -xzf "$LATEST_BACKUP" -O proxmox-config/interfaces > /tmp/interfaces_backup
+   diff /etc/network/interfaces /tmp/interfaces_backup
+   ```
+
+### Restauración Completa en Servidor Nuevo
+
+#### Preparación del servidor nuevo:
+
+1. **Instalar Proxmox VE** en el servidor nuevo
+2. **Montar el disco de backup** en `/mnt/backup_usb1/`
+3. **Extraer el backup más reciente:**
+   ```bash
+   cd /tmp
+   LATEST_BACKUP=$(ls -t /mnt/backup_usb1/proxmox-config/monthly/proxmox-config-*.tar.gz | head -n 1)
+   tar -xzf "$LATEST_BACKUP"
+   ```
+
+#### Proceso de restauración:
+
+1. **Detener servicios críticos:**
+   ```bash
+   systemctl stop pveproxy
+   systemctl stop pvedaemon
+   systemctl stop pvestatd
+   ```
+
+2. **Restaurar configuración de red:**
+   ```bash
+   cp /tmp/proxmox-config/interfaces /etc/network/interfaces
+   cp /tmp/proxmox-config/hosts /etc/hosts
+   cp /tmp/proxmox-config/hostname /etc/hostname
+   ```
+
+3. **Restaurar configuración PVE:**
+   ```bash
+   # CUIDADO: Esto sobrescribirá toda la configuración PVE
+   cp -r /tmp/proxmox-config/pve/* /etc/pve/
+   ```
+
+4. **Restaurar otras configuraciones:**
+   ```bash
+   cp /tmp/proxmox-config/fstab /etc/fstab
+   cp /tmp/proxmox-config/crontab /etc/crontab
+   
+   # SSH (opcional)
+   cp /tmp/proxmox-config/ssh/* /etc/ssh/
+   
+   # Servicios systemd personalizados
+   cp /tmp/proxmox-config/systemd/* /etc/systemd/system/
+   ```
+
+5. **Reiniciar servicios:**
+   ```bash
+   systemctl daemon-reload
+   systemctl start pveproxy
+   systemctl start pvedaemon
+   systemctl start pvestatd
+   ```
+
+6. **Reiniciar el servidor:**
+   ```bash
+   reboot
+   ```
+
+#### Verificación post-restauración:
 
 ```bash
-# 1. Montar USB o acceder a backup
-mount /dev/sdX1 /mnt/backup_usb1
+# Verificar servicios PVE
+systemctl status pveproxy pvedaemon pvestatd
 
-# 2. Localizar backup más reciente
-BACKUP_FILE=$(ls -t /mnt/backup_usb1/proxmox_backup/proxmox-config-*.tar.gz | head -1)
-echo "Restaurando desde: $BACKUP_FILE"
+# Verificar configuración de red
+ip addr show
 
-# 3. Detener servicios Proxmox
-systemctl stop pve-cluster pvedaemon pveproxy pvestatd
-
-# 4. Crear backup de configuración actual (por seguridad)
-tar -czf /root/config-backup-pre-restore-$(date +%Y%m%d_%H%M%S).tar.gz /etc/pve/
-
-# 5. Restaurar configuración
-cd /
-tar -xzf "$BACKUP_FILE"
-
-# 6. Ajustar permisos críticos
-chown -R root:www-data /etc/pve/
-chmod 755 /etc/pve/
-chmod 640 /etc/pve/user.cfg
-chmod 600 /root/.ssh/id_* 2>/dev/null || true
-
-# 7. Reiniciar servicios
-systemctl start pve-cluster
-sleep 10
-systemctl start pvedaemon pveproxy pvestatd
-
-# 8. Verificar funcionamiento
-pvecm status 2>/dev/null || echo "Cluster no configurado"
-pvesm status
-```
-
-### Restauración selectiva de componentes
-
-```bash
-# Solo configuración de VMs
-tar -xzf "$BACKUP_FILE" etc/pve/qemu-server/
-tar -xzf "$BACKUP_FILE" etc/pve/lxc/
-systemctl restart pvedaemon
-
-# Solo configuración de red
-tar -xzf "$BACKUP_FILE" etc/network/interfaces
-systemctl restart networking
-
-# Solo configuración de storage
-tar -xzf "$BACKUP_FILE" etc/pve/storage.cfg
-systemctl restart pvedaemon
-
-# Solo usuarios y permisos
-tar -xzf "$BACKUP_FILE" etc/pve/user.cfg
-systemctl restart pvedaemon
-```
-
-### Verificación post-restauración
-
-```bash
-# Verificar servicios
-systemctl status pve-cluster pvedaemon pveproxy pvestatd
-
-# Verificar conectividad web
-curl -k https://localhost:8006 >/dev/null 2>&1 && echo "Web UI disponible"
-
-# Verificar configuraciones
-pvesm status
+# Verificar VMs y contenedores
 qm list
 pct list
 
-# Verificar logs por errores
-journalctl -u pve* --since "10 minutes ago" | grep -i error
+# Verificar storages
+pvesm status
 ```
 
-## 8. Verificaciones importantes
+## Configuración de Cron
 
-### Antes de implementar
+### Configuración Recomendada
+
+1. **Abrir el editor de crontab:**
+   ```bash
+   crontab -e
+   ```
+
+2. **Agregar las líneas de backup:**
+   ```cron
+   # Backup de configuración Proxmox
+   # Backup diario a las 2:00 AM
+   0 2 * * * /mnt/backup_usb1/proxmox-config/scripts/backup-config.sh daily >/dev/null 2>&1
+   
+   # Backup semanal los domingos a las 3:00 AM
+   0 3 * * 0 /mnt/backup_usb1/proxmox-config/scripts/backup-config.sh weekly >/dev/null 2>&1
+   
+   # Backup mensual el primer día del mes a las 4:00 AM
+   0 4 1 * * /mnt/backup_usb1/proxmox-config/scripts/backup-config.sh monthly >/dev/null 2>&1
+   ```
+
+3. **Guardar y salir:**
+   - En nano: `Ctrl+X`, luego `Y`, luego `Enter`
+   - En vim: `Esc`, luego `:wq`, luego `Enter`
+
+### Verificar la Configuración de Cron
 
 ```bash
-# Verificar espacio disponible
-df -h /root
-df -h /mnt/backup_usb1
+# Ver crontab actual
+crontab -l
 
-# Probar scripts manualmente
-/root/proxmox_backup/backup-proxmox-config-local.sh
-/root/proxmox_backup/verify-config-backups.sh
+# Verificar que el servicio cron está ejecutándose
+systemctl status cron
 
-# Verificar montaje USB persistente
-umount /mnt/backup_usb1
-mount -a
-mountpoint /mnt/backup_usb1
+# Ver logs de cron (para verificar ejecuciones)
+grep CRON /var/log/syslog | tail -10
 ```
 
-### Monitoreo continuo
+### Configuración con Logs Detallados
+
+Si quieres ver los logs de cron por separado:
+
+```cron
+# Backup con logs separados
+0 2 * * * /mnt/backup_usb1/proxmox-config/scripts/backup-config.sh daily >> /var/log/cron-backup.log 2>&1
+0 3 * * 0 /mnt/backup_usb1/proxmox-config/scripts/backup-config.sh weekly >> /var/log/cron-backup.log 2>&1
+0 4 1 * * /mnt/backup_usb1/proxmox-config/scripts/backup-config.sh monthly >> /var/log/cron-backup.log 2>&1
+```
+
+### Monitoreo de Ejecuciones de Cron
 
 ```bash
-# Verificar últimos backups
-ls -la /root/proxmox_backup/proxmox-config-*.tar.gz | tail -5
-ls -la /mnt/backup_usb1/proxmox_backup/proxmox-config-*.tar.gz | tail -5
+# Ver últimas ejecuciones de cron
+grep "backup-config.sh" /var/log/syslog | tail -5
 
-# Verificar logs de backup
-tail -20 /var/log/proxmox-config-backup.log
+# Verificar si cron ejecutó los backups hoy
+grep "$(date +%Y-%m-%d)" /var/log/proxmox-config-backup.log
 
-# Verificar tareas de cron
-grep -i backup /var/log/cron.log | tail -5
+# Ver próximas ejecuciones programadas (requiere el paquete 'cron-utils' o script personalizado)
+crontab -l | grep backup-config
 ```
+
+## Configuración
+
+### Modificar Retención de Backups
+
+Editar el script `backup-config.sh` y modificar estos valores en la función `main()`:
+
+```bash
+case "$backup_type" in
+    daily)
+        cleanup_backups "daily" 7      # Cambiar 7 por días deseados
+        ;;
+    weekly)
+        cleanup_backups "weekly" 4     # Cambiar 4 por semanas deseadas
+        ;;
+    monthly)
+        cleanup_backups "monthly" 12   # Cambiar 12 por meses deseados
+        ;;
+esac
+```
+
+### Agregar Archivos Adicionales al Backup
+
+Editar la función `do_backup()` en `backup-config.sh` y agregar:
+
+```bash
+# Ejemplo: agregar configuración personalizada
+[ -f "/etc/mi-config.conf" ] && cp /etc/mi-config.conf "$config_temp/" 2>/dev/null
+```
+
+## Solución de Problemas
+
+### Problemas Comunes
+
+1. **Script no termina la ejecución:**
+   ```bash
+   # Verificar procesos colgados
+   ps aux | grep backup-config.sh
+   # Matar proceso si es necesario
+   pkill -f backup-config.sh
+   ```
+
+2. **Error de permisos:**
+   ```bash
+   # Verificar permisos del script
+   ls -la /mnt/backup_usb1/proxmox-config/scripts/
+   # Corregir si es necesario
+   chmod +x /mnt/backup_usb1/proxmox-config/scripts/*.sh
+   ```
+
+3. **Disco lleno:**
+   ```bash
+   # Verificar espacio disponible
+   df -h /mnt/backup_usb1/
+   # Limpiar backups antiguos manualmente si es necesario
+   ```
+
+4. **Backup corrupto:**
+   ```bash
+   # Verificar integridad
+   tar -tzf archivo_backup.tar.gz >/dev/null 2>&1
+   echo $?  # 0 = OK, != 0 = corrupto
+   ```
+
+### Logs y Debugging
+
+```bash
+# Ver log en tiempo real
+tail -f /var/log/proxmox-config-backup.log
+
+# Buscar errores en el log
+grep -i error /var/log/proxmox-config-backup.log
+
+# Ejecutar script en modo debug
+bash -x /mnt/backup_usb1/proxmox-config/scripts/backup-config.sh daily
+```
+
+## Seguridad
+
+### Recomendaciones
+
+- Los backups contienen **información sensible** (configuraciones de red, certificados)
+- **Proteger el acceso** al disco de backup
+- **Verificar regularmente** la integridad de los backups
+- **Probar la restauración** periódicamente en un entorno de prueba
+- **Mantener múltiples copias** en ubicaciones diferentes para backups críticos
+
+### Permisos
+
+```bash
+# Verificar permisos seguros
+chmod 700 /mnt/backup_usb1/proxmox-config/
+chmod 600 /mnt/backup_usb1/proxmox-config/*/*.tar.gz
+```
+
+## Licencia y Soporte
+
+Este proyecto está diseñado para uso interno. Para soporte adicional o modificaciones, consultar la documentación de Proxmox VE y las mejores prácticas de backup de sistemas Linux.
+
+### Información de Contacto del Sistema
+
+- **Log de operaciones**: `/var/log/proxmox-config-backup.log`
+- **Directorio de scripts**: `/mnt/backup_usb1/proxmox-config/scripts/`
+- **Configuración cron**: `crontab -l` (usuario root)
