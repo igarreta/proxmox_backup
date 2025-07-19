@@ -42,9 +42,12 @@ Sistema automatizado de backup para la configuración crítica de servidores Pro
 
 2. **Copiar los scripts:**
    ```bash
-   # Copiar backup-config.sh y explore-backup.sh a:
-   cp backup-config.sh /mnt/backup_usb1/proxmox-config/scripts/
-   cp explore-backup.sh /mnt/backup_usb1/proxmox-config/scripts/
+   # Clonar este repositorio
+   mkdir -p /mnt/backup_usb1/proxmox-config/scripts
+   cd /mnt/backup_usb1/proxmox-config
+   git clone https://github.com/igarreta/proxmox_backup.git
+   cp proxmox_backup/* scripts/
+   rm -r proxmox_backup
    
    # Dar permisos de ejecución
    chmod +x /mnt/backup_usb1/proxmox-config/scripts/*.sh
